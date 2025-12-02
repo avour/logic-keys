@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Debug launcher for Logic Keys OSC Controller app
-APP_PATH="dist/Logic Keys OSC Controller.app"
+APP_PATH="dist/Logic Keys OSrC Controller.app"
+# APP_PATH="/Applications/Logic Keys OSC Controller.app"
 EXECUTABLE_PATH="$APP_PATH/Contents/MacOS/Logic Keys OSC Controller"
 
 if [ ! -d "$APP_PATH" ]; then

@@ -6,9 +6,8 @@ import threading
 import time
 
 # CONFIG
-XR18_IP = "192.168.1.20" 
 XR18_PORT = 10024         # Default OSC control port
-MUTE_PATH = "/bus/1/mix/on"  # Change to your desired mute target
+MUTE_PATHS = ["/bus/1/mix/on", "/bus/2/mix/on"]  # Mute targets
 MUTE_VALUE = 0
 UNMUTE_VALUE = 1
 RECONNECT_INTERVAL = 5    # Seconds between reconnection attempts
@@ -20,15 +19,44 @@ MIDI_USB_DIN_PASSTHRU_MODE = 64  # b6: din midi ↔ usb midi passthru (bit 6 = 1
 
 # Connection status tracking
 connection_status = "Disconnected"
+XR18_IP = None  # Will be set based on local network
 sock = None
 connection_lock = threading.Lock()
 
 # MIDI mode tracking
 current_midi_mode = "DIN_RX"  # Can be "DIN_RX" or "USB_DIN_PASSTHRU"
 
+def get_xr18_ip():
+    """Get XR18 IP based on local network (assumes XR18 is at .20)."""
+    global XR18_IP
+    try:
+        # Create a socket to determine local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        
+        # Use the same network base with .20 for XR18
+        network_base = ".".join(local_ip.split(".")[:3])
+        XR18_IP = f"{network_base}.15"
+        print(f"[INFO] Local IP: {local_ip}, XR18 IP: {XR18_IP}")
+        return XR18_IP
+    except Exception as e:
+        print(f"[ERROR] Could not determine local network: {e}")
+        return None
+
 def create_socket():
     """Create and configure the UDP socket for OSC communication."""
-    global sock, connection_status
+    global sock, connection_status, XR18_IP
+    
+    # If no IP is set, get it from local network
+    if not XR18_IP:
+        get_xr18_ip()
+        if not XR18_IP:
+            connection_status = "No Network"
+            print(f"[ERROR] Cannot create socket - could not determine XR18 IP")
+            return False
+    
     try:
         with connection_lock:
             if sock:
@@ -36,7 +64,7 @@ def create_socket():
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(5.0)  # 5 second timeout for operations
             connection_status = "Connected"
-            print(f"[INFO] Socket created and configured")
+            print(f"[INFO] Socket created and configured for {XR18_IP}")
             return True
     except Exception as e:
         connection_status = "Disconnected"
@@ -46,6 +74,11 @@ def create_socket():
 def test_connection():
     """Test the connection by sending a test OSC message."""
     global connection_status
+    
+    if not XR18_IP:
+        connection_status = "No Network"
+        return False
+    
     try:
         with connection_lock:
             if not sock:
@@ -121,17 +154,27 @@ def toggle_keyboard_mode():
 def on_press(key):
     try:
         if key.char and key.char.lower() == 'r':
-            send_osc(MUTE_PATH, MUTE_VALUE)  # Mute
+            for path in MUTE_PATHS:
+                send_osc(path, MUTE_VALUE)  # Mute
     except AttributeError:
         if key == keyboard.Key.space:
-            send_osc(MUTE_PATH, UNMUTE_VALUE)  # Unmute
+            for path in MUTE_PATHS:
+                send_osc(path, UNMUTE_VALUE)  # Unmute
     except Exception as e:
         print("[ERROR]", e)
 
 def main():
+    # Get XR18 IP based on local network
+    if not XR18_IP:
+        get_xr18_ip()
+    
+    if not XR18_IP:
+        print(f"[ERROR] Could not determine network. Please check connection.")
+        return
+    
     print(f"[INFO] Logic Keys OSC Controller Started")
     print(f"[INFO] Target: {XR18_IP}:{XR18_PORT}")
-    print(f"[INFO] OSC Path: {MUTE_PATH}")
+    print(f"[INFO] OSC Paths: {MUTE_PATHS}")
     print(f"[INFO] Controls: R = Mute ({MUTE_VALUE}), Space = Unmute ({UNMUTE_VALUE})")
     print(f"[INFO] Press Ctrl+C to exit")
     
@@ -149,23 +192,26 @@ class LogicKeysApp(rumps.App):
         
         # Menu items that we need to update dynamically
         self.status_item = rumps.MenuItem("Status: Connecting...", callback=None)
+        self.target_item = rumps.MenuItem("Target: Discovering...", callback=None)
         self.reconnect_item = rumps.MenuItem("Reconnect", callback=self.manual_reconnect)
+        self.rescan_item = rumps.MenuItem("Refresh Network", callback=self.rescan_network)
         self.midi_mode_item = rumps.MenuItem("MIDI Mode: DIN RX", callback=None)
         self.toggle_keyboard_item = rumps.MenuItem("Toggle Keyboard", callback=self.toggle_keyboard_menu)
         
         self.menu = [
             self.status_item,
             None,  # Separator
-            rumps.MenuItem("Target: " + XR18_IP + ":" + str(XR18_PORT), callback=None),
+            self.target_item,
             None,  # Separator
             self.midi_mode_item,
             self.toggle_keyboard_item,
             None,  # Separator
             self.reconnect_item,
+            self.rescan_item,
             None,  # Separator
             rumps.MenuItem("Controls:", callback=None),
-            rumps.MenuItem("  R = Mute (" + str(MUTE_VALUE) + ")", callback=None),
-            rumps.MenuItem("  Space = Unmute (" + str(UNMUTE_VALUE) + ")", callback=None),
+            rumps.MenuItem("  R = Mute Bus 1 & 2", callback=None),
+            rumps.MenuItem("  Space = Unmute Bus 1 & 2", callback=None),
             None,  # Separator
             rumps.MenuItem("Quit", callback=self.quit_application)
         ]
@@ -198,8 +244,16 @@ class LogicKeysApp(rumps.App):
             self.status_item.title = "Status: ✅ Connected"
         elif connection_status == "Connecting...":
             self.status_item.title = "Status: 🔄 Connecting..."
+        elif connection_status == "No Network":
+            self.status_item.title = "Status: ⚠️ No Network"
         else:
             self.status_item.title = "Status: ❌ Disconnected"
+        
+        # Update target display
+        if XR18_IP:
+            self.target_item.title = f"Target: {XR18_IP}:{XR18_PORT}"
+        else:
+            self.target_item.title = "Target: Not found"
         
         # Update MIDI mode display
         if current_midi_mode == "DIN_RX":
@@ -210,6 +264,7 @@ class LogicKeysApp(rumps.App):
     def start_reconnect_monitor(self):
         """Start the automatic reconnection monitor in a background thread."""
         def reconnect_worker():
+            global connection_status
             while self.should_reconnect:
                 try:
                     # Update status display
@@ -252,6 +307,22 @@ class LogicKeysApp(rumps.App):
         # Run reconnection in background to avoid blocking UI
         threading.Thread(target=reconnect_task, daemon=True).start()
     
+    def rescan_network(self, _):
+        """Refresh the XR18 IP based on current network."""
+        global connection_status, XR18_IP
+        print(f"[INFO] Network refresh requested")
+        XR18_IP = None  # Reset IP to re-detect
+        connection_status = "Connecting..."
+        self.update_status_display()
+        
+        def rescan_task():
+            if get_xr18_ip():
+                create_socket()
+            self.update_status_display()
+        
+        # Run in background to avoid blocking UI
+        threading.Thread(target=rescan_task, daemon=True).start()
+    
     def toggle_keyboard_menu(self, _):
         """Toggle keyboard mode triggered by menu click."""
         def toggle_task():
@@ -274,9 +345,12 @@ class LogicKeysApp(rumps.App):
         self.listener_thread = threading.Thread(target=listener_worker, daemon=True)
         self.listener_thread.start()
         print(f"[INFO] Logic Keys OSC Controller Started")
-        print(f"[INFO] Target: {XR18_IP}:{XR18_PORT}")
-        print(f"[INFO] OSC Path: {MUTE_PATH}")
-        print(f"[INFO] Controls: R = Mute ({MUTE_VALUE}), Space = Unmute ({UNMUTE_VALUE})")
+        if XR18_IP:
+            print(f"[INFO] Target: {XR18_IP}:{XR18_PORT}")
+        else:
+            print(f"[INFO] Target: Auto-discovery enabled")
+        print(f"[INFO] OSC Paths: {MUTE_PATHS}")
+        print(f"[INFO] Controls: R = Mute Bus 1 & 2, Space = Unmute Bus 1 & 2")
     
     def quit_application(self, _):
         """Quit the application"""
